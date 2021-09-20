@@ -1,0 +1,148 @@
+#! /bin/bash
+#
+# This software is dedicated to Public Domain and, as such, bears no
+# copyright. Please see LICENSE file for details.
+#
+
+function do_help() {
+cat <<EOT
+Usage:
+
+$(basename $0) options <ssh-host> <sysroot-name>
+
+Where,
+
+<ssh-host>  
+    is SSH connection string in form of [user@]server:
+    and it should connecto to the RaspberryPi for which
+    you are creating the sysroot.
+
+<sysroot-name>
+    is the name to giv the sysroot. It is good idea to
+    give sysroots unique names such that to minimize
+    possibility of conflicts when using multiple sysroots
+    in a project.
+
+options is one or more of the following:
+
+-h  display this text
+
+-v  produce verbose output
+
+-f  force overwriting of existing sysroot
+
+EOT
+}
+
+function _error() {
+    echo "$@" >&2
+}
+
+function _info() {
+    if [[ $verbose == 1 ]]; then
+        echo "$@"
+    fi
+}
+
+echo "RaspberryPi sysroot creation script"
+
+verbose=
+force=
+our_dir=$(dirname $0)
+
+while getopts "hvf" OPTION "$@"; do
+    case $OPTION in
+        h)  do_help
+            exit 1;;
+        v)  verbose=1;;
+        f)  force=1;;
+        *)  _error "Unrecognized option $OPTION. Use -h for help."
+            exit 2;;
+    esac
+done
+shift $((OPTIND - 1))
+
+ssh_host="$1"
+sysroot_name="$2"
+
+if [[ -z $ssh_host ]]; then
+    _error "SSH host parameter is missing. Use -h for help"
+    exit 2
+fi
+
+if [[ -z $sysroot_name ]]; then
+    _error "Sysroot name parameter is missing. Use -h for help"
+    exit 2
+fi
+
+
+#
+# Make sure the destination directory is ready
+#
+
+sysroot_dir="$sysroot_name/sysroot"
+sysroot_test="$sysroot_name/test"
+
+if [[ -d "$sysroot_name" ]]; then
+    if [[ $force != 1 ]]; then
+        _error "Sysroot directory $sysroot_name already exists. Use -f to overwrite"
+        exit 3
+    else
+        _info "Cleaning up $sysroot_dir because -f specified"
+        [[ -d "$sysroot_dir" ]] && rm -r "$sysroot_dir" || exit $?
+        _info "Cleaning up $sysroot_test because -f specified"
+        [[ -d "$sysroot_test" ]] && rm -r "$sysroot_test" || exit $?
+    fi
+else
+    _info "Creating directory $sysroot_name"
+    mkdir "$sysroot_name" || exit $?
+fi
+
+_info "Creating directory $sysroot_dir"
+mkdir "$sysroot_dir" || exit $?
+
+_info "Creating directory $sysroot_test"
+mkdir "$sysroot_test" || exit $?
+
+
+#
+# Everything is prepared - copy sysroot from target 
+#
+
+echo Copying sysroot files via rsync will take a while. Exercise patience..."
+
+tripple=arm-linux-gnueabihf
+_info "Copying sysroot files from $ssh_host"
+rsync -rzLR --safe-links $ssh_host{/usr/lib/$tripple,/usr/lib/gcc/$tripple,/usr/include,/lib/$tripple} "$sysroot_dir/"
+[[ $? == 0 ]] || exit $?
+
+# This is quite a heuristic (a.k.a. a hack) to find this, but it works for me
+_info "Finding the latest GCC version in sysroot" 
+gcc_dir=$(
+    for gcc_dir in $(find "$sysroot_dir/usr/include/c++" -type d -depth 1); do
+        if [[ $(ls -1 "$gcc_dir" | wc -l | sed -e 's/ //g') != 0 ]]; then
+            echo "$gcc_dir"
+        fi
+    done | sort -r | head -n 1
+) || exit $?
+
+if [[ -z $gcc_dir ]]; then
+    _error "Could not determine GCC version in the $sysroot_dir"
+    exit 4
+fi
+
+gcc_version=$(basename "$gcc_dir")
+
+if [[ ! -d "$sysroot_dir/usr/include/c++/$gcc_version" ]]; then
+    _error "Something is very wrong - either a bug in this script or sysroot layout changed"
+    _error "GCC version '$gcc_version' not found in '$sysroot_dir/usr/include/c++'"
+    exit 5
+fi
+
+_info "Creating $sysroot_name/RPi.mk Makefile"
+cat "$our_dir/RPiTemplate.mk" | sed -e "s/GCC_Version/$gcc_version/g;s/RPiTemplate_/${sysroot_name}_/g" > "$sysroot_name/RPi.mk"
+
+_info "Creating test project"
+cp -r "$our_dir/test" "$sysroot_name/" || exit $?
+
+echo "Sysroot $sysroot_name created"
